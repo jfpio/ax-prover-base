@@ -20,6 +20,8 @@ __all__ = [
     "LogLevel",
     "MemoryConfig",
     "ProverConfig",
+    "ReasoningTraceConfig",
+    "StructuredOutputMode",
     "SummarizeOutputConfig",
 ]
 
@@ -32,6 +34,13 @@ class LogLevel(StrEnum):
     WARNING = "WARNING"
     ERROR = "ERROR"
     CRITICAL = "CRITICAL"
+
+
+class StructuredOutputMode(StrEnum):
+    """How provider structured-output responses are parsed by the client."""
+
+    NATIVE_PYDANTIC = "native_pydantic"
+    JSON_SCHEMA_MANUAL = "json_schema_manual"
 
 
 DEFAULT_LLM_RETRY_CONFIG = {
@@ -58,6 +67,9 @@ class LLMConfig:
     model: str
     provider_config: dict[str, Any] = field(default_factory=dict)
     retry_config: dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_LLM_RETRY_CONFIG))
+    # Keep this string-typed so OmegaConf accepts the public lower-case values
+    # used in YAML. LLMClient converts it to StructuredOutputMode and validates it.
+    structured_output_mode: str = StructuredOutputMode.NATIVE_PYDANTIC
 
 
 @dataclass
@@ -77,6 +89,20 @@ class SummarizeOutputConfig:
 
 
 @dataclass
+class ReasoningTraceConfig:
+    """Configuration for local reasoning-token traces."""
+
+    enabled: bool = False
+    output_dir: str | None = None
+    run_id: str = "manual"
+    problem_uuid: str | None = None
+    top_logprobs: int = 20
+    vocabulary_size: int | None = None
+    require_alignment: bool = True
+    entropy_version: str = "reasoning_topk_v1"
+
+
+@dataclass
 class ProverConfig:
     """Configuration for ProverAgent."""
 
@@ -87,6 +113,8 @@ class ProverConfig:
         default_factory=lambda: MemoryConfig(class_name="ExperienceProcessor")
     )
     summarize_output: SummarizeOutputConfig = field(default_factory=SummarizeOutputConfig)
+    max_input_tokens: int = 32768
+    reasoning_trace: ReasoningTraceConfig = field(default_factory=ReasoningTraceConfig)
     user_comments: str | None = None
 
 
