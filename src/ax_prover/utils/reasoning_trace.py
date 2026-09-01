@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import statistics
 import time
 from collections.abc import Iterator
@@ -333,6 +334,7 @@ def analyze_provider_payload(
         }
 
     final_alignment_status = "empty"
+    final_alignment_basis = None
     final_token_start = None
     final_token_end = None
     final_token_records: list[dict[str, Any]] = []
@@ -343,6 +345,7 @@ def analyze_provider_payload(
         if final_token_end > final_token_start and entries[-1].get("token") == "<|im_end|>":
             final_token_end -= 1
         final_alignment_status = "aligned"
+        final_alignment_basis = "qwen3_closing_delimiter_token_span"
         for final_position, entry in enumerate(entries[final_token_start:final_token_end]):
             final_token_records.append(
                 {
@@ -363,6 +366,33 @@ def analyze_provider_payload(
         final_byte_start = generated.find(final_bytes, byte_end)
         if final_byte_start < 0:
             final_alignment_status = "final_content_not_found_in_logprob_tokens"
+            if reasoning_delimiter_span:
+                candidate_start = closing_delimiters[0] + 1
+                candidate_end = len(entries)
+                if candidate_end > candidate_start and entries[-1].get("token") == "<|im_end|>":
+                    candidate_end -= 1
+                decoded_candidate = b"".join(token_bytes[candidate_start:candidate_end]).decode(
+                    "utf-8", errors="strict"
+                )
+                if _matches_lossy_provider_unicode(final_content, decoded_candidate):
+                    final_token_start = candidate_start
+                    final_token_end = candidate_end
+                    final_alignment_status = "aligned"
+                    final_alignment_basis = "qwen3_first_closing_delimiter_lossy_unicode_span"
+                    for final_position, entry in enumerate(
+                        entries[final_token_start:final_token_end]
+                    ):
+                        final_token_records.append(
+                            {
+                                "generated_position": final_token_start + final_position,
+                                "final_position": final_position,
+                                "token": str(entry.get("token") or ""),
+                                "bytes": entry.get("bytes"),
+                                "sampled_logprob": _finite_float(entry.get("logprob")),
+                                "top_logprobs": entry.get("top_logprobs") or [],
+                            }
+                        )
+                    final_decode_matches_provider = decoded_candidate == final_content
         else:
             final_byte_end = final_byte_start + len(final_bytes)
             try:
@@ -372,6 +402,7 @@ def analyze_provider_payload(
                 final_alignment_status = "final_content_boundary_splits_token"
             else:
                 final_alignment_status = "aligned"
+                final_alignment_basis = "provider_final_content_span"
                 for final_position, entry in enumerate(entries[final_token_start:final_token_end]):
                     final_token_records.append(
                         {
@@ -403,6 +434,7 @@ def analyze_provider_payload(
         "generated_token_count": len(entries),
         "reasoning_token_count": len(token_records),
         "final_alignment_status": final_alignment_status,
+        "final_alignment_basis": final_alignment_basis,
         "final_decode_matches_provider": final_decode_matches_provider,
         "final_token_start": final_token_start,
         "final_token_end": final_token_end,
@@ -538,6 +570,7 @@ class ReasoningTraceWriter:
             "reasoning_token_count": analysis.get("reasoning_token_count", 0),
             "generated_token_count": analysis.get("generated_token_count"),
             "final_alignment_status": analysis.get("final_alignment_status"),
+            "final_alignment_basis": analysis.get("final_alignment_basis"),
             "final_decode_matches_provider": analysis.get("final_decode_matches_provider"),
             "final_token_start": analysis.get("final_token_start"),
             "final_token_end": analysis.get("final_token_end"),
@@ -698,6 +731,20 @@ def _entry_bytes(entry: Any) -> bytes:
     if isinstance(token, str):
         return token.encode("utf-8")
     raise ReasoningAlignmentError("logprob token entry has neither bytes nor token text")
+
+
+def _matches_lossy_provider_unicode(provider_text: str, decoded_text: str) -> bool:
+    """Accept only vLLM replacement runs for provider-visible Unicode characters."""
+
+    if provider_text == decoded_text:
+        return True
+    pattern = "".join(
+        re.escape(character)
+        if character == "\ufffd" or character.isascii()
+        else f"(?:{re.escape(character)}|\ufffd+)"
+        for character in provider_text
+    )
+    return re.fullmatch(pattern, decoded_text) is not None
 
 
 def _token_entropy_metrics(
