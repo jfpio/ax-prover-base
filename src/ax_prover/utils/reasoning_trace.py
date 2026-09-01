@@ -339,13 +339,21 @@ def analyze_provider_payload(
     final_token_end = None
     final_token_records: list[dict[str, Any]] = []
     final_decode_matches_provider = None
-    if final_content and closed_delimiter_span:
+    delimiter_bounded_final = final_content and (
+        closed_delimiter_span
+        or (reasoning_delimiter_span and choice.get("finish_reason") == "length")
+    )
+    if delimiter_bounded_final:
         final_token_start = closing_delimiters[0] + 1
         final_token_end = len(entries)
         if final_token_end > final_token_start and entries[-1].get("token") == "<|im_end|>":
             final_token_end -= 1
         final_alignment_status = "aligned"
-        final_alignment_basis = "qwen3_closing_delimiter_token_span"
+        final_alignment_basis = (
+            "qwen3_closing_delimiter_token_span"
+            if closed_delimiter_span
+            else "qwen3_first_closing_delimiter_to_length_stop"
+        )
         for final_position, entry in enumerate(entries[final_token_start:final_token_end]):
             final_token_records.append(
                 {

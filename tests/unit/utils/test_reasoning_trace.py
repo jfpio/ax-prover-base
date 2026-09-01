@@ -259,6 +259,32 @@ def test_first_closing_delimiter_aligns_lossy_unicode_final_span() -> None:
     assert analysis["final_decode_matches_provider"] is False
 
 
+def test_first_closing_delimiter_aligns_final_region_to_length_stop() -> None:
+    payload = _payload()
+    payload["choices"][0]["finish_reason"] = "length"
+    payload["choices"][0]["message"]["reasoning_content"] = "think"
+    payload["choices"][0]["message"]["content"] = "∀ x </think> ∃ y"
+    payload["choices"][0]["logprobs"]["content"] = [
+        _entry("<think>", 0.9, [("<think>", 0.9)]),
+        _entry("think", 0.8, [("think", 0.8)]),
+        _entry("</think>", 0.9, [("</think>", 0.9)]),
+        _entry("∀ x ", 0.8, [("∀ x ", 0.8)]),
+        _entry("</think>", 0.9, [("</think>", 0.9)]),
+        _entry(" �� y", 0.8, [(" �� y", 0.8)]),
+        _entry(" (�", 0.8, [(" (�", 0.8)]),
+    ]
+
+    analysis = analyze_provider_payload(payload, vocabulary_size=151936)
+
+    assert analysis["alignment_status"] == "aligned"
+    assert analysis["final_alignment_status"] == "aligned"
+    assert analysis["final_alignment_basis"] == "qwen3_first_closing_delimiter_to_length_stop"
+    assert analysis["final_token_start"] == 3
+    assert analysis["final_token_end"] == 7
+    assert analysis["final_token_count"] == 4
+    assert analysis["final_decode_matches_provider"] is False
+
+
 def test_rejects_reasoning_boundary_that_splits_a_token() -> None:
     payload = _payload()
     payload["choices"][0]["logprobs"]["content"][0] = _entry(
