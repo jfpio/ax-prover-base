@@ -127,6 +127,31 @@ ax-prover experiment dataset_name
 ax-prover experiment dataset_name --max-concurrency 8
 ```
 
+### Running with vLLM on Helios
+
+AxProver can run in the same Slurm allocation as an OpenAI-compatible vLLM
+server. This prevents the prover from waiting on a login node or workstation
+while the GPU job is queued. Build the ARM64 client image described in
+[`containers/ax-prover`](containers/ax-prover/README.md), convert it to an
+Apptainer SIF, and use `helios-utils` to generate a supervised job:
+
+```bash
+helios-vllm Qwen/Qwen3-8B \
+  --account YOUR_GRANT-gpu-gh200 \
+  --work-dir "$SCRATCH/helios-vllm" \
+  --served-model-name ax-prover-model \
+  --client-container /absolute/group/path/ax-prover-arm64.sif \
+  --client-work-dir /absolute/group/path/lean-project \
+  --run ax-prover --config helios_vllm.yaml \
+    prove MyModule:my_theorem \
+    --folder /absolute/group/path/lean-project
+```
+
+The generated job starts vLLM, waits for its health and model endpoints, runs
+AxProver against `127.0.0.1`, and terminates vLLM when the prover exits. The
+project directory is bind-mounted read-write and should retain its `.lake`
+artifacts between jobs.
+
 <details>
 <summary><strong>Configuration</strong></summary>
 

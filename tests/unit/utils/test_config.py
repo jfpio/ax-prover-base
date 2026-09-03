@@ -154,6 +154,23 @@ class TestMergeConfigs:
         result = merge_configs([Config(), "configs/default.yaml"])
         assert result.prover.max_iterations == 50
 
+    def test_bundled_helios_vllm_config(self, monkeypatch, tmp_path):
+        """The packaged Helios profile resolves the colocated vLLM endpoint."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("AX_PROVER_MODEL", "ax-prover-test-model")
+        monkeypatch.setenv("AX_PROVER_API_BASE", "http://127.0.0.1:8123/v1")
+
+        result = merge_configs([Config(), "helios_vllm.yaml"])
+
+        assert result.prover.prover_llm.model == "openai:ax-prover-test-model"
+        assert result.prover.prover_llm.structured_output_mode == "json_schema_manual"
+        assert result.prover.prover_llm.provider_config["base_url"] == (
+            "http://127.0.0.1:8123/v1"
+        )
+        assert result.prover.prover_llm.provider_config["max_retries"] == 0
+        assert result.prover.prover_llm.retry_config["stop_after_attempt"] == 3
+        assert result.prover.proposer_tools == {}
+
 
 class TestLoadEnvSecrets:
     """Tests for load_env_secrets function."""

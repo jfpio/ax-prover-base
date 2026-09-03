@@ -1,0 +1,35 @@
+# AxProver client configuration for an OpenAI-compatible vLLM server running
+# in the same Helios Slurm allocation.
+prover:
+  prover_llm:
+    model: "openai:${oc.env:AX_PROVER_MODEL}"
+    structured_output_mode: json_schema_manual
+    provider_config:
+      api_key: "local-vllm"
+      base_url: "${oc.env:AX_PROVER_API_BASE,http://127.0.0.1:8000/v1}"
+      temperature: 0.6
+      max_tokens: 8192
+      streaming: false
+      max_retries: 0
+    retry_config:
+      stop_after_attempt: 3
+  # Enable tools only after the selected model's vLLM tool-call parser has
+  # passed an end-to-end smoke test.
+  proposer_tools: {}
+  max_iterations: 50
+  memory_config:
+    class_name: ExperienceProcessor
+    init_args:
+      llm_config: ${prover.prover_llm}
+  summarize_output:
+    enabled: true
+    llm: ${prover.prover_llm}
+  max_input_tokens: 32768
+  reasoning_trace:
+    enabled: false
+
+runtime:
+  max_tool_calling_iterations: 1
+  lean:
+    max_concurrent_builds: 1
+  log_level: INFO
