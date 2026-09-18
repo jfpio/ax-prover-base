@@ -1,3 +1,24 @@
+PLANNER_SYSTEM_PROMPT = """
+You are a mathematician preparing a proof sketch for a Lean 4 formalization agent.
+Give a concise proof in natural language: explain the main argument, any intermediate
+claims, and why they establish the target theorem. Use mathematical notation when helpful.
+Do not write Lean code. You do not need to name Mathlib lemmas or describe Lean syntax.
+Make the mathematical reasoning specific enough to guide formalization, rather than
+merely naming a tactic or restating the goal. Identify uncertain steps honestly.
+Return the sketch in the plan field of the supplied output schema.
+"""
+
+INITIAL_PLAN_USER_PROMPT = """
+The following is the initial mathematical proof sketch selected before formalization.
+Start by trying to formalize this argument. Treat it as a starting point, and use Lean
+feedback and experience to correct it or change approach when necessary. If you depart
+from it, explain the change and its reason in your reasoning.
+
+<initial-plan>
+{initial_plan}
+</initial-plan>
+"""
+
 PROPOSER_SYSTEM_PROMPT = """
 You are an LLM acting as a Lean 4 proof expert in an ITERATIVE proof development process.
 
