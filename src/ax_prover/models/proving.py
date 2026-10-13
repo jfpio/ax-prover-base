@@ -4,7 +4,7 @@ from typing import Annotated
 
 from langchain_core.messages import BaseMessage
 from langgraph.graph import add_messages
-from pydantic import BaseModel, Field, SerializeAsAny, model_validator
+from pydantic import BaseModel, Field, SerializeAsAny, field_validator, model_validator
 
 from .declaration import Declaration
 from .files import Location
@@ -34,6 +34,30 @@ class TargetItem(BaseModel):
         default=False,
         description="Whether this item has been proven",
     )
+    completion_targets: list[str] = Field(default_factory=list)
+    completion_hole_spans: list[tuple[int, int]] = Field(default_factory=list)
+
+    def render_completion(self, bodies: dict[str, str]) -> str:
+        """Reconstruct a multi-declaration task from its immutable template."""
+        if not self.original_source or not self.completion_targets:
+            raise ValueError("completion requires a trusted template and targets")
+        if set(bodies) != set(self.completion_targets):
+            raise ValueError("completion bodies must cover exactly the designated targets")
+        if len(self.completion_targets) != len(self.completion_hole_spans):
+            raise ValueError("completion target/hole count mismatch")
+        parts, cursor = [], 0
+        for name, (start, end) in zip(
+            self.completion_targets, self.completion_hole_spans, strict=True
+        ):
+            if start < cursor or end <= start or end > len(self.original_source):
+                raise ValueError("invalid completion hole span")
+            body = bodies[name].strip()
+            if not body:
+                raise ValueError("completion body must not be empty")
+            parts.extend((self.original_source[cursor:start], body))
+            cursor = end
+        parts.append(self.original_source[cursor:])
+        return "".join(parts)
 
     @property
     def name(self) -> str:
@@ -66,6 +90,12 @@ class ProverAgentState(BaseModel):
     """State model for the prover agent workflow."""
 
     item: TargetItem = Field(description="The item to prove")
+
+    initial_plan: str | None = Field(
+        default=None,
+        description="Original natural-language proof sketch; independent of evolving experience",
+    )
+    planning_call_id: str | None = Field(default=None)
 
     messages: Annotated[list[SerializeAsAny[BaseMessage]], add_messages] = Field(
         default_factory=list,
@@ -147,6 +177,37 @@ class ProverAgentState(BaseModel):
             if isinstance(msg, ReviewApprovedFeedback):
                 return True
         return False
+
+
+class ProofPlan(BaseModel):
+    """A mathematical proof sketch, without Lean implementation."""
+
+    plan: str = Field(
+        description="Natural-language proof sketch with the key mathematical argument"
+    )
+
+    @field_validator("plan")
+    @classmethod
+    def nonempty_plan(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("proof plan must not be empty")
+        return value
+
+
+class CompletionBody(BaseModel):
+    declaration: str
+    body: str
+
+
+class CompletionResult(BaseModel):
+    """Bodies for every designated answer/proof hole in a joint task."""
+
+    bodies: list[CompletionBody] = Field(
+        description="List each requested declaration and its Lean body after := exactly once. "
+        "Provide an answer expression or a by proof, without declaration headers. "
+        "Use sorry inside unfinished bodies when developing a partial solution."
+    )
 
 
 class ProverResult(BaseModel):

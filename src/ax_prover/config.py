@@ -103,6 +103,17 @@ class ReasoningTraceConfig:
 
 
 @dataclass
+class PlanningConfig:
+    """Generate a natural-language proof sketch before the first proposal."""
+
+    enabled: bool = False
+    # Only the planner sees this optional oracle reference, never the proposer.
+    reference_proof: str | None = None
+    informal_statement: str | None = None
+    reference_answer: str | None = None
+
+
+@dataclass
 class ProverConfig:
     """Configuration for ProverAgent."""
 
@@ -116,6 +127,7 @@ class ProverConfig:
     max_input_tokens: int = 32768
     reasoning_trace: ReasoningTraceConfig = field(default_factory=ReasoningTraceConfig)
     user_comments: str | None = None
+    planning: PlanningConfig = field(default_factory=PlanningConfig)
 
 
 @dataclass

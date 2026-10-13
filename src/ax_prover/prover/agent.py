@@ -27,7 +27,7 @@ from ..models.messages import (
     SorriesGoalStateFeedback,
     StructuredOutputParsingFailedFeedback,
 )
-from ..models.proving import ProverResult, ReviewDecision
+from ..models.proving import CompletionResult, ProofPlan, ProverResult, ReviewDecision
 from ..runtime import Runtime
 from ..tools import create_tool
 from ..utils import (
@@ -62,6 +62,8 @@ from . import memory as memory_module
 from .memory import BaseMemory
 from .prompts import (
     ATTEMPT_TEMPLATE,
+    INITIAL_PLAN_USER_PROMPT,
+    PLANNER_SYSTEM_PROMPT,
     PREVIOUS_ATTEMPT_USER_PROMPT,
     PROPOSER_SYSTEM_PROMPT,
     PROPOSER_SYSTEM_PROMPT_SINGLE_SHOT,
@@ -165,7 +167,12 @@ class ProverAgent:
         workflow.add_node("aggregate_metrics", self._aggregate_metrics_node)
         workflow.add_node("summarize_output", self._summarize_output_node)
 
-        workflow.add_edge(START, "proposer")
+        if self.config.planning.enabled:
+            workflow.add_node("planner", self._planner_node)
+            workflow.add_edge(START, "planner")
+            workflow.add_edge("planner", "proposer")
+        else:
+            workflow.add_edge(START, "proposer")
         workflow.add_conditional_edges(
             "proposer",
             self.route_proposer,
@@ -277,6 +284,54 @@ class ProverAgent:
             )
         )
 
+    async def _planner_node(self, state: ProverAgentState) -> dict:
+        """Plan once without proposing code, compiling it, or updating experience."""
+        if state.initial_plan is not None:
+            if not state.initial_plan.strip():
+                raise ValueError("initial_plan must not be empty")
+            return {}
+        if state.iteration_count:
+            raise ValueError("cannot generate an initial plan after proof proposals")
+        if self.config.planning.informal_statement is not None:
+            query = "<problem>\n" + self.config.planning.informal_statement + "\n</problem>"
+        else:
+            query = PROPOSER_USER_PROMPT.format(
+                target_theorem=state.item.location.formatted_context,
+                complete_file=read_file(self.runtime.base_folder, state.item.location.path),
+            )
+        query = "Write a natural-language proof sketch; do not implement the proof.\n\n" + query
+        if self.config.planning.reference_answer:
+            query += (
+                "\n\nThe following is the correct final answer, not a proof. "
+                "Use it to derive a solution and proof strategy.\n<reference-answer>\n"
+                + self.config.planning.reference_answer
+                + "\n</reference-answer>"
+            )
+        if self.config.planning.reference_proof:
+            query += (
+                "\n\nUse this reference solution to derive the mathematical proof sketch. "
+                "Explain its argument in natural language without reproducing Lean code.\n"
+                "<reference-proof>\n"
+                + self.config.planning.reference_proof
+                + "\n</reference-proof>"
+            )
+        system_prompt = PLANNER_SYSTEM_PROMPT
+        if self.config.user_comments and self.config.planning.informal_statement is None:
+            system_prompt += f"\n\n<user-comments>\n{self.config.user_comments}\n</user-comments>"
+        capture = self._new_trace_capture(state, role="planner")
+        try:
+            response = await self.llm_client.ainvoke(
+                [SystemMessage(content=system_prompt), HumanMessage(content=query)],
+                output_schema=ProofPlan,
+                trace_capture=capture,
+            )
+        except Exception as error:
+            self.reasoning_trace_writer.record_transport_failure(capture=capture, error=error)
+            raise
+        self.reasoning_trace_writer.record_proposer(capture=capture, normalized_response=response)
+        plan = ProofPlan.model_validate_json(response.text)
+        return {"initial_plan": plan.plan, "planning_call_id": capture.context.call_id}
+
     async def _proposer_node(self, state: ProverAgentState, config: RunnableConfig) -> dict:
         self.logger.info(
             f"Proposing proof (iteration {state.iteration_count + 1}) for: "
@@ -296,6 +351,14 @@ class ProverAgent:
             if self.config.max_iterations == 1
             else PROPOSER_SYSTEM_PROMPT
         )
+        if state.item.completion_targets:
+            system_prompt += (
+                "\n\nJoint completion mode uses the bodies response format. "
+                "Complete all designated answer definitions and proof holes. "
+                "Preserve declaration signatures and theorem statements. "
+                "Return named bodies as specified below; the single-theorem "
+                "imports/opens/updated_theorem output examples are superseded."
+            )
 
         if self.config.user_comments:
             system_prompt += f"\n\n<user-comments>\n{self.config.user_comments}\n</user-comments>"
@@ -304,6 +367,19 @@ class ProverAgent:
             target_theorem=state.item.location.formatted_context,
             complete_file=complete_file,
         )
+
+        if state.initial_plan:
+            query += "\n\n" + INITIAL_PLAN_USER_PROMPT.format(initial_plan=state.initial_plan)
+
+        if state.item.completion_targets:
+            query += (
+                "\n\nComplete both the answer definitions and their proof in this file. "
+                "Return a bodies list containing exactly these declaration names: "
+                + ", ".join(state.item.completion_targets)
+                + ". Each value replaces only the body after :=, without a declaration "
+                "header. Local have/let proofs are allowed. All other source is frozen. "
+                "Include every requested body on every proposal."
+            )
 
         if state.last_proposal:
             previous_attempt_prompt = PREVIOUS_ATTEMPT_USER_PROMPT.format(
@@ -330,7 +406,7 @@ class ProverAgent:
                 self.llm_client,
                 context_messages,
                 tools=self.proposer_tools,
-                output_schema=ProverResult,
+                output_schema=CompletionResult if state.item.completion_targets else ProverResult,
                 max_tool_iterations=self.runtime.config.max_tool_calling_iterations,
                 trace_capture=trace_capture,
             )
@@ -379,7 +455,14 @@ class ProverAgent:
             raise
 
         try:
-            result = ProverResult.model_validate_json(response.text)
+            if state.item.completion_targets:
+                completion = CompletionResult.model_validate_json(response.text)
+                bodies = {entry.declaration: entry.body for entry in completion.bodies}
+                if len(bodies) != len(completion.bodies):
+                    raise ValueError("duplicate completion target")
+                result = ProverResult(updated_theorem=state.item.render_completion(bodies))
+            else:
+                result = ProverResult.model_validate_json(response.text)
         except Exception as e:
             self.logger.error(f"Structured output parsing failed: {e}")
             feedback = StructuredOutputParsingFailedFeedback(error_message=str(e))
@@ -497,18 +580,38 @@ class ProverAgent:
                     feedback = MissingTargetTheoremFeedback(theorem_name=state.item.location.name)
                     return {"messages": [feedback]}
 
-                if proposed_proof and proposed_proof.sorries:
+                completion_declarations = [proposed_proof]
+                if state.item.completion_targets:
+                    completion_declarations = [
+                        find_declaration_by_name(declarations, name)
+                        for name in state.item.completion_targets
+                    ]
+                    if any(declaration is None for declaration in completion_declarations):
+                        return {
+                            "messages": [
+                                MissingTargetTheoremFeedback(
+                                    theorem_name=", ".join(state.item.completion_targets)
+                                )
+                            ]
+                        }
+                sorries = [
+                    sorry
+                    for declaration in completion_declarations
+                    for sorry in declaration.sorries
+                ]
+                if sorries:
                     self.logger.info("The proposed code contains sorries.")
                     feedback = SorriesGoalStateFeedback(
-                        sorry_count=len(proposed_proof.sorries),
-                        goal_state_at_sorries=format_goal_state_at_sorries(proposed_proof.sorries),
+                        sorry_count=len(sorries),
+                        goal_state_at_sorries=format_goal_state_at_sorries(sorries),
                     )
                     return {"messages": [feedback]}
 
-                if feedback := await _detect_cheats_in_code(
-                    proposed_proof, declarations, state.item.original_declarations
-                ):
-                    return {"messages": [feedback]}
+                for declaration in completion_declarations:
+                    if feedback := await _detect_cheats_in_code(
+                        declaration, declarations, state.item.original_declarations
+                    ):
+                        return {"messages": [feedback]}
 
                 feedback = BuildSuccessFeedback()
                 return {"messages": [feedback]}
@@ -554,6 +657,14 @@ class ProverAgent:
         )
 
         reviewer_system_prompt = REVIEWER_SYSTEM_PROMPT
+        if state.item.completion_targets:
+            reviewer_system_prompt += (
+                "\n\nThis is joint answer/proof completion. Completing designated "
+                "answer-definition bodies is expected and permitted. Check that all "
+                "declaration signatures and theorem statements are preserved and that "
+                "every completed answer/proof body is free of sorry/admit. Targets: "
+                + ", ".join(state.item.completion_targets)
+            )
         if self.config.user_comments:
             reviewer_system_prompt += (
                 f"\n\n<user-comments>\n{self.config.user_comments}\n</user-comments>"
